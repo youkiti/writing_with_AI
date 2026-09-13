@@ -8,6 +8,7 @@ breaks, and says so via a skip reason rather than failing silently).
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -155,6 +156,72 @@ class TestCheckDirectEdits(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("directly changed by the reviewer", proc.stdout)
 
+    def _check_citation_round_trip(self, text: str, *, edited: bool, plain_fragments: tuple[str, ...]):
+        self.assertTrue(USE_DEMO_REFS, "citation regression cases require the demo bibliography and CSL")
+        snapshot = self.td / "snapshot.md"
+        reviewed = self.td / "reviewed.md"
+        docx = self.td / "reviewed.docx"
+        write(snapshot, text)
+        write(reviewed, text.replace("Original", "CHANGEDWORD", 1) if edited else text)
+        self._render_docx(reviewed, docx)
+        plain = subprocess.run(
+            ["pandoc", str(docx), "--track-changes=reject", "-t", "plain", "--wrap=none"],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        for fragment in plain_fragments:
+            self.assertIn(fragment, plain.stdout)
+
+        proc = run(["--reviewed-docx", str(docx), "--snapshot", str(snapshot), "--json"])
+        self.assertEqual(proc.returncode, 2 if edited else 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        if edited:
+            self.assertIn("CHANGEDWORD", proc.stdout)
+            self.assertEqual(len(result["findings"]), 1, proc.stdout)
+            finding = result["findings"][0]
+            self.assertEqual(finding["snapshot"], ["Original wording remains."])
+            self.assertEqual(finding["reviewed"], ["CHANGEDWORD wording remains."])
+        else:
+            self.assertEqual(result["findings"], [])
+
+    def _check_inline_code_citations(self, *, edited: bool):
+        self._check_citation_round_trip(
+            "Original wording remains.\n\n"
+            "引用は pandoc citekey `[@key]` / で示す。\n\n"
+            "`[@page2021prisma]` はコード例です。\n\n"
+            "```text\n[@key] @page2021prisma\n```\n\n"
+            "Evidence supports the claim [@page2021prisma].\n",
+            edited=edited,
+            plain_fragments=("[@key]", "[@page2021prisma]", "[@key] @page2021prisma"),
+        )
+
+    def test_inline_code_citations_unchanged_exits_zero(self):
+        self._check_inline_code_citations(edited=False)
+
+    def test_inline_code_citations_changed_word_is_detected(self):
+        self._check_inline_code_citations(edited=True)
+
+    def _check_unresolved_citations(self, *, edited: bool):
+        self._check_citation_round_trip(
+            "Original wording remains.\n\n"
+            "Sources （gray lit, @nosuchkey2026） and (see @alsomissing).\n\n"
+            "Grouped [@nosuchkey2026; @alsomissing].\n\n"
+            "An unrelated question: uncertain?\n",
+            edited=edited,
+            plain_fragments=(
+                "（gray lit,^(nosuchkey2026?)）",
+                "(see^(alsomissing?))",
+                "^(nosuchkey2026?,alsomissing?)",
+                "uncertain?",
+            ),
+        )
+
+    def test_unresolved_citations_unchanged_exits_zero(self):
+        self._check_unresolved_citations(edited=False)
+
+    def test_unresolved_citations_changed_word_is_detected(self):
+        self._check_unresolved_citations(edited=True)
+
     def test_pending_suggestions_reject_to_snapshot_exits_zero(self):
         snapshot_text = (
             "---\ntitle: Probe\n---\n\n"
@@ -208,8 +275,7 @@ class TestCheckDirectEdits(unittest.TestCase):
         self.assertIn("小児患者", proc.stdout)
 
     def test_email_address_in_unchanged_paragraph_exits_zero(self):
-        # NARRATIVE_CITEKEY_RE must not treat the "@example.com" part of an email
-        # address as a bare `@key` narrative citation and strip it.
+        # An email address must survive citation removal.
         text = (
             "---\ntitle: Probe\n---\n\n"
             "# Contact\n\n"

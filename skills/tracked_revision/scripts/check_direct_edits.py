@@ -35,9 +35,10 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------- pandoc runners
-def run_pandoc(args: list[str]) -> str:
+def run_pandoc(args: list[str], *, input_text: str | None = None) -> str:
     proc = subprocess.run(
         ["pandoc", *args],
+        input=input_text,
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -53,8 +54,32 @@ def reviewed_plain_text(docx_path: Path) -> str:
     return run_pandoc([str(docx_path), "--track-changes=reject", "-t", "plain", "--wrap=none"])
 
 
-def snapshot_plain_text(snapshot_path: Path) -> str:
-    return run_pandoc([str(snapshot_path), "-t", "plain", "--wrap=none"])
+def snapshot_plain_text(snapshot_path: Path) -> tuple[str, set[str]]:
+    document = json.loads(run_pandoc([str(snapshot_path), "-t", "json"]))
+    citation_ids: set[str] = set()
+
+    def remove_citations(node):
+        if isinstance(node, list):
+            result = []
+            for item in node:
+                if isinstance(item, dict) and item.get("t") == "Cite":
+                    citation_ids.update(citation["citationId"] for citation in item["c"][0])
+                    remove_citations(item["c"][1])
+                else:
+                    result.append(remove_citations(item))
+            return result
+        if isinstance(node, dict):
+            if node.get("t") in {"Code", "CodeBlock"}:
+                return node
+            return {key: remove_citations(value) for key, value in node.items()}
+        return node
+
+    document = remove_citations(document)
+    text = run_pandoc(
+        ["-f", "json", "-t", "plain", "--wrap=none"],
+        input_text=json.dumps(document, ensure_ascii=False),
+    )
+    return text, citation_ids
 
 
 # ---------------------------------------------------------------- normalization
@@ -70,12 +95,6 @@ SUPERSCRIPT_RUN_RE = re.compile(
 CARET_CITATION_RE = re.compile(r"\^\([0-9,\-‐-―\s]+\)")
 # 角括弧の数値引用 [1] [1,2] [1-3] [1–3]
 BRACKET_CITATION_RE = re.compile(r"\[\d+(?:\s*[,\-‐-―]\s*\d+)*\]")
-# pandoc citekey: [@key] [-@key] [@key1; @key2] (ブラケット形式)
-BRACKET_CITEKEY_RE = re.compile(r"\s*\[-?@[^\]]*\]")
-# 地の文の @key (narrative citation)。citeproc を通さない側にだけ残る。
-# 直前が単語文字 (英数字・_) やピリオドなら email などの一部とみなしてマッチしない
-# (例: user@example.com の "@example" を誤って消さない)。
-NARRATIVE_CITEKEY_RE = re.compile(r"(?<![\w.])-?@[A-Za-z0-9_][A-Za-z0-9_:.#$%&\-+?<>~/]*")
 # 参考文献リストの各項目 (AMA: "1. Author ..." 形式)
 NUMBERED_REF_LINE_RE = re.compile(r"^\d+\.\s+\S")
 # 表の罫線 (- のみの行) と空行
@@ -96,23 +115,22 @@ YAML_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.S)
 META_FIELD_RE = re.compile(r'^(?:title|author|date)\s*:\s*(.*)$')
 
 
-def strip_reviewed_citations(text: str) -> str:
+def strip_reviewed_citations(text: str, citation_ids: set[str] | None = None) -> str:
+    if citation_ids:
+        ids = "|".join(re.escape(key) for key in sorted(citation_ids, key=lambda key: (-len(key), key)))
+        unresolved = rf"(?:{ids})\?"
+        text = re.sub(rf"\^\(\s*{unresolved}(?:\s*[,;]\s*{unresolved})*\s*\)", "", text)
+        text = re.sub(rf"(?<!\w){unresolved}(?!\w)", "", text)
     text = CARET_CITATION_RE.sub("", text)
     text = SUPERSCRIPT_RUN_RE.sub("", text)
     text = BRACKET_CITATION_RE.sub("", text)
     return text
 
 
-def strip_snapshot_citations(text: str) -> str:
-    text = BRACKET_CITEKEY_RE.sub("", text)
-    text = NARRATIVE_CITEKEY_RE.sub("", text)
-    return text
-
-
 def collapse_whitespace(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     # 引用除去でできた「語 と句読点の間の空白」を詰める
-    text = re.sub(r"\s+([.,;:!?、。」』])", r"\1", text)
+    text = re.sub(r"\s+([.,;:!?、。)）\]」』])", r"\1", text)
     return text.strip()
 
 
@@ -152,7 +170,7 @@ def split_chunk_into_units(lines: list[str]) -> list[str]:
     return [" ".join(l.strip() for l in lines)]
 
 
-def paragraphs_from(text: str, *, is_reviewed: bool, metadata_values: set[str] | None = None) -> list[str]:
+def paragraphs_from(text: str, *, is_reviewed: bool, metadata_values: set[str] | None = None, citation_ids: set[str] | None = None) -> list[str]:
     metadata_values = metadata_values or set()
     raw_paragraphs = re.split(r"\n\s*\n", text.replace("\r\n", "\n"))
     paras: list[str] = []
@@ -170,9 +188,7 @@ def paragraphs_from(text: str, *, is_reviewed: bool, metadata_values: set[str] |
                 unit = m.group(1)
                 was_solo_bracket = True
             if is_reviewed:
-                unit = strip_reviewed_citations(unit)
-            else:
-                unit = strip_snapshot_citations(unit)
+                unit = strip_reviewed_citations(unit, citation_ids)
             unit = collapse_whitespace(unit)
             if not unit:
                 pending_caption = None
@@ -255,7 +271,7 @@ def main() -> int:
 
     try:
         reviewed_raw = reviewed_plain_text(args.reviewed_docx)
-        snapshot_raw = snapshot_plain_text(args.snapshot)
+        snapshot_raw, citation_ids = snapshot_plain_text(args.snapshot)
     except (RuntimeError, FileNotFoundError) as e:
         print(f"エラー: pandoc の実行に失敗しました: {e}")
         return 1
@@ -263,7 +279,7 @@ def main() -> int:
     metadata_values = extract_metadata_values(
         args.snapshot.read_text(encoding="utf-8", errors="replace")
     )
-    reviewed_paras = paragraphs_from(reviewed_raw, is_reviewed=True, metadata_values=metadata_values)
+    reviewed_paras = paragraphs_from(reviewed_raw, is_reviewed=True, metadata_values=metadata_values, citation_ids=citation_ids)
     snapshot_paras = paragraphs_from(snapshot_raw, is_reviewed=False)
 
     findings = compare(reviewed_paras, snapshot_paras)
