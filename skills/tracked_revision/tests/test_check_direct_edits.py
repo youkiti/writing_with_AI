@@ -19,6 +19,9 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_direct_edits.py"
 TESTS_DIR = Path(__file__).resolve().parent
 FIXTURE_V1 = TESTS_DIR / "fixture_v1.md"
+GOOGLE_EXPORT_DIR = TESTS_DIR / "fixtures_google_export"
+GOOGLE_EXPORT_DOCX = GOOGLE_EXPORT_DIR / "reviewed_google_export.docx"
+GOOGLE_EXPORT_SNAPSHOT = GOOGLE_EXPORT_DIR / "snapshot_v1.md"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEMO_BIB = REPO_ROOT / "demo" / "refs.bib"
 DEMO_CSL = REPO_ROOT / "demo" / "styles" / "american-medical-association.csl"
@@ -251,6 +254,46 @@ class TestCheckDirectEdits(unittest.TestCase):
 
         result = run(["--reviewed-docx", str(docx), "--snapshot", str(fixture_copy)])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_real_google_export_fixture_exits_zero(self):
+        # Real-world regression: a v2 docx produced by make_tracked_md.py +
+        # pandoc, uploaded to Drive, imported as a Google Doc, and exported
+        # back to docx by rclone. Nobody edited it directly, so rejecting all
+        # tracked changes must reproduce the v1 snapshot exactly. This is not
+        # a pandoc-made docx (unlike every other test above) and exposed three
+        # generic normalization gaps: Google's export flattens the docx
+        # Title/Author/Date paragraph styles into ordinary body text (Title
+        # itself disappears, Author/Date remain as plain paragraphs), it
+        # duplicates the figure caption as a second, differently-styled
+        # paragraph right after the image placeholder, and it splits a tight
+        # ordered list (one paragraph, four lines) into four separate
+        # paragraphs. The images the snapshot references (assets/figure1.png)
+        # do not exist under fixtures_google_export/; `-t plain` never fetches
+        # image bytes, so that is not expected to matter.
+        self.assertTrue(GOOGLE_EXPORT_DOCX.exists(), f"missing fixture: {GOOGLE_EXPORT_DOCX}")
+        self.assertTrue(GOOGLE_EXPORT_SNAPSHOT.exists(), f"missing fixture: {GOOGLE_EXPORT_SNAPSHOT}")
+
+        proc = run(["--reviewed-docx", str(GOOGLE_EXPORT_DOCX), "--snapshot", str(GOOGLE_EXPORT_SNAPSHOT)])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_real_google_export_fixture_detects_edited_word(self):
+        # Same fixture pair, but with one word changed in a copy of the
+        # snapshot (in a tempdir, so the committed fixture is untouched).
+        # This must still be caught as a direct edit despite all the
+        # normalization added to make the unedited pair above exit 0.
+        self.assertTrue(GOOGLE_EXPORT_SNAPSHOT.exists(), f"missing fixture: {GOOGLE_EXPORT_SNAPSHOT}")
+        original = GOOGLE_EXPORT_SNAPSHOT.read_text(encoding="utf-8")
+        needle = "same core ideas for protocols"
+        replacement = "same core CHANGEDWORD for protocols"
+        self.assertIn(needle, original, "fixture text assumption changed; update this test")
+        edited = original.replace(needle, replacement)
+
+        edited_snapshot = self.td / "snapshot_v1_edited.md"
+        write(edited_snapshot, edited)
+
+        proc = run(["--reviewed-docx", str(GOOGLE_EXPORT_DOCX), "--snapshot", str(edited_snapshot)])
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("CHANGEDWORD", proc.stdout)
 
 
 if __name__ == "__main__":

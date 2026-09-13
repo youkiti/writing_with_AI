@@ -89,6 +89,11 @@ CAPTION_LINE_RE = re.compile(r"^:\s+\S")
 # 段落全体が `[...]` 一枚だけで囲われている場合 (pandoc plain が単独の画像/図を
 # こう書く) の外側の角括弧。中身を残して比較できるようにする。
 SOLO_BRACKET_RE = re.compile(r"^\[(.*)\]$")
+# 順序付き/箇条書きリストの項目行 (行頭のマーカーで判定)。
+LIST_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+\S")
+# Markdown の YAML front matter から title/author/date を拾う (簡易パーサ)。
+YAML_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.S)
+META_FIELD_RE = re.compile(r'^(?:title|author|date)\s*:\s*(.*)$')
 
 
 def strip_reviewed_citations(text: str) -> str:
@@ -111,26 +116,78 @@ def collapse_whitespace(text: str) -> str:
     return text.strip()
 
 
-def paragraphs_from(text: str, *, is_reviewed: bool) -> list[str]:
+def extract_metadata_values(md_text: str) -> set[str]:
+    """スナップショット Markdown の YAML front matter から title/author/date の
+    値を拾う。Google Docs 側の実物データで確認したように、Word の "Title" /
+    "Author" / "Date" スタイル段落が Google Docs のインポート/エクスポートを
+    経由すると (Title は消え、Author/Date は) 通常の本文段落に化けて
+    reviewed 側にだけ出てくることがある。スナップショット側はメタデータを
+    展開しない (`-t plain` を standalone なしで実行している) ので、この値と
+    完全一致する reviewed 側の段落は本文の直接編集ではなくこの現象とみなして
+    除外する。"""
+    m = YAML_FRONTMATTER_RE.match(md_text)
+    if not m:
+        return set()
+    values: set[str] = set()
+    for line in m.group(1).split("\n"):
+        mm = META_FIELD_RE.match(line.strip())
+        if not mm:
+            continue
+        v = mm.group(1).strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        v = collapse_whitespace(v)
+        if v:
+            values.add(v)
+    return values
+
+
+def split_chunk_into_units(lines: list[str]) -> list[str]:
+    """空行区切りの1ブロックを比較単位に分ける。番号付き/箇条書きリストは、
+    タイトな1ブロック (項目間に空行なし) でも、Google Docs 経由で項目ごとに
+    別ブロックになっていても同じ粒度で比較できるよう、行ごとに独立した単位
+    として扱う。それ以外の段落は今までどおり1行に結合する。"""
+    if len(lines) > 1 and all(LIST_ITEM_RE.match(l) for l in lines):
+        return [l.strip() for l in lines]
+    return [" ".join(l.strip() for l in lines)]
+
+
+def paragraphs_from(text: str, *, is_reviewed: bool, metadata_values: set[str] | None = None) -> list[str]:
+    metadata_values = metadata_values or set()
     raw_paragraphs = re.split(r"\n\s*\n", text.replace("\r\n", "\n"))
     paras: list[str] = []
+    pending_caption: str | None = None
     for p in raw_paragraphs:
         lines = [l for l in p.split("\n") if l.strip() and not RULE_LINE_RE.match(l)]
         if not lines:
             continue
-        joined = " ".join(l.strip() for l in lines)
-        if CAPTION_LINE_RE.match(joined):
-            continue
-        m = SOLO_BRACKET_RE.match(joined)
-        if m:
-            joined = m.group(1)
-        if is_reviewed:
-            joined = strip_reviewed_citations(joined)
-        else:
-            joined = strip_snapshot_citations(joined)
-        joined = collapse_whitespace(joined)
-        if joined:
-            paras.append(joined)
+        for unit in split_chunk_into_units(lines):
+            if CAPTION_LINE_RE.match(unit):
+                continue
+            was_solo_bracket = False
+            m = SOLO_BRACKET_RE.match(unit)
+            if m:
+                unit = m.group(1)
+                was_solo_bracket = True
+            if is_reviewed:
+                unit = strip_reviewed_citations(unit)
+            else:
+                unit = strip_snapshot_citations(unit)
+            unit = collapse_whitespace(unit)
+            if not unit:
+                pending_caption = None
+                continue
+            if is_reviewed and unit in metadata_values:
+                # Google Docs エクスポートで本文に化けた Title/Author/Date。
+                pending_caption = None
+                continue
+            if pending_caption is not None and unit == pending_caption:
+                # 画像プレースホルダ ([caption]) の直後に、別の書式で同じ
+                # キャプションが重複して出てくる場合の2件目を落とす。
+                pending_caption = None
+                continue
+            paras.append(unit)
+            pending_caption = unit if was_solo_bracket else None
 
     if is_reviewed:
         # citeproc が末尾に追加した番号付き参考文献リストを落とす。
@@ -203,7 +260,10 @@ def main() -> int:
         print(f"エラー: pandoc の実行に失敗しました: {e}")
         return 1
 
-    reviewed_paras = paragraphs_from(reviewed_raw, is_reviewed=True)
+    metadata_values = extract_metadata_values(
+        args.snapshot.read_text(encoding="utf-8", errors="replace")
+    )
+    reviewed_paras = paragraphs_from(reviewed_raw, is_reviewed=True, metadata_values=metadata_values)
     snapshot_paras = paragraphs_from(snapshot_raw, is_reviewed=False)
 
     findings = compare(reviewed_paras, snapshot_paras)
