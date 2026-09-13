@@ -539,7 +539,7 @@ into a project log or share with co-authors. Contents:
 - The target-article identity (the article being responded to).
 - Review punch-list with each item marked `addressed` / `dismissed` (with
   reason).
-- A short "next actions" list (e.g., "Co-author review", "Add author block",
+- A short "next actions" list (e.g., "[Co-author review](#co-author-review-round-after-hand-off)", "Add author block",
   "Submit via journal correspondence portal").
 
 Before writing the hand-off, run these blockers:
@@ -551,6 +551,63 @@ Before writing the hand-off, run these blockers:
 
 Write the hand-off to `projects/<name>/handoff.md`. Tell the author the
 workflow is complete.
+
+## Co-author review round (after hand-off)
+
+Enter this branch **only when the author reports that co-authors commented
+on the shared Google Doc after hand-off**. It is not a normal numbered step.
+
+The first upload of the hand-off draft uses
+[`render_and_upload`](../render_and_upload/SKILL.md), which records v1 in
+`projects/<name>/versions/versions.md` and saves `versions/draft.v1.md`.
+Without that snapshot, this branch cannot run; stop and tell the author
+(see Failure modes for the author-agreed baseline candidate).
+
+1. Run [`tracked_revision`](../tracked_revision/SKILL.md) Step 1: fetch the
+   reviewed Doc into `projects/<name>/review/vN/`, run
+   `parse_docx_changes.py`, and run `check_direct_edits.py` against the v1
+   snapshot for round 1. For later rounds, follow its "Round 2 以降"
+   procedure, including the manual direct-edit check and fresh comment IDs.
+2. Run `tracked_revision` Step 2 to build `review/vN/response_table.md`.
+   Surface the response table and obtain author confirmation before revision.
+3. Re-enter **Step 8**, using the table's `修正` / `一部修正` rows, every
+   accepted co-author suggestion (tracked change in `review/vN/report.md`,
+   confirmed with the author item by item), and every adopted direct edit
+   from `check_direct_edits.py` findings as revision items. This replaces `tracked_revision` Step 3; the branch writes
+   `draft.md` only through Step 8, with all its rules still in force.
+   Record rejected suggestions as ID-less table rows with reasons per
+   `tracked_revision` Step 2; the target-article quote gate below also
+   applies to suggestions that characterize the article.
+   Any new characterization of the target article must trace to a quote
+   confirmed at the Step 2 quote gate; a co-author's new claim about the
+   article goes through that gate first. New supporting references must
+   pass Step 4 (search + reference quote gate) and Step 5 before citation.
+   Cite only keys in `refs.bib`, run the style self-check, and surface
+   the revision diff summary.
+4. Before any upload, re-run Step 9 (citation verify, final, plus word and
+   reference limits recheck). Preserve its target-article exception and
+   carry any "unconfirmed limits" warning to the hand-off. Require zero
+   `[TODO: ...]`, as at Step 10. On verification failure, loop back to
+   Step 8 and repeat verification; do not upload.
+5. Run `tracked_revision` Steps 4–6: `make_tracked_md.py` + pandoc for
+   tracked docx with original comments and replies, verification, then
+   upload v{N+1} as a **new Doc** using its Step 0 hash-name and ledger
+   procedure. Update `handoff.md` with the round number, new Doc URL,
+   and response table path.
+
+Keep the main 10-row state block unchanged. Emit and update this separate
+round block alongside it (record any agreed baseline here):
+
+```markdown
+### co-author round N
+| stage | status | artifact |
+|---|---|---|
+| fetch + direct-edit check (tracked_revision 1) | pending / done | <review/vN path; direct edits found?> |
+| response table (tracked_revision 2) | pending / done | <path; rows by 対応> |
+| revision (Step 8) | pending / done | <diff summary> |
+| verification (Step 9) | pending / done | <citation counts; word/reference counts and limits or warning> |
+| tracked v{N+1} upload (tracked_revision 4–6) | pending / done | <Doc URL; ledger row> |
+```
 
 ## Rules (must follow)
 
@@ -591,6 +648,9 @@ workflow is complete.
     flag causal language (S2), the letter's own prose must avoid it too.
 12. **Skips are explicit and recorded.** `skipped` ≠ `done`.
 13. **Hand-off requires zero `[TODO: ...]` in `draft.md`.**
+14. **Shared Google Doc co-author comments use only the co-author review
+    round branch.** Revise only by re-entering Step 8. Never overwrite
+    the existing Doc; follow the `tracked_revision` ledger procedure.
 
 ## Output format
 
@@ -610,6 +670,9 @@ next gate (proceed / revise / skip).
 
 | Failure | Handling |
 |---|---|
+| Co-author comments returned but `versions/draft.v1.md` is missing (v1 uploaded without the ledger) | Stop and tell the author. `tracked_revision` has no automated fallback. `pandoc <reviewed>.docx --track-changes=reject -t markdown` yields only a baseline candidate: citation keys return as rendered numbers, so every citation shows as a change. Use it only with explicit author agreement and record that in the round state. |
+| `check_direct_edits.py` exits 2 | Show the detected paragraphs to the author. Record adopt / not adopt decisions as ID-less response-table rows before Step 8. |
+| A verification step fails after co-author revision | Loop back to Step 8 with the findings, then repeat verification. Do not upload. |
 | No target-article file in `projects/<name>/` | Stop at Step 1. Ask the author to place the file by hand. Do not WebFetch it. |
 | Author confirms the article but says a chosen passage is wrong | Revise the Step 2 ledger and re-emit the quote gate. Do not advance until passages are confirmed. |
 | Memo point maps to no taxonomy code | Surface it at Step 3; ask whether it is in scope. A non-bias/non-spin point may belong elsewhere. |
@@ -702,6 +765,9 @@ Pass criteria:
      `~/.claude/skills/proofread-manuscript/`; invoke via the `Skill` tool;
      skip for Japanese letters; if not installed, fall back to the
      `style_discipline.md` self-check — see Step 7).
+  5. [render_and_upload](../render_and_upload/SKILL.md): first upload after
+     hand-off, recording v1 in the ledger with its Markdown snapshot.
+  6. [tracked_revision](../tracked_revision/SKILL.md): co-author review round only.
 - This orchestrator follows the same "Markdown is the source of truth, AI
   does partial revisions" discipline as
   [case_report_workflow](../case_report_workflow/SKILL.md), and the same
