@@ -172,6 +172,16 @@ powershell -ExecutionPolicy Bypass -File demo/render_docx.ps1
 
 > Skill: [skills/fetch_gdoc_changes/](skills/fetch_gdoc_changes/)
 
+### 11. 共著者コメントに対応した v2 を Google Docs に返す
+
+```text
+review/v1/report.md を読んで対応表 (response_table.md) を作って。
+それに沿って draft.md を直して。
+できたら tracked_revision Skill で、変更履歴とコメント返答入りの v2 の docx を作って。
+```
+
+> Skill: [skills/tracked_revision/](skills/tracked_revision/)
+
 ---
 
 ## フォルダ構成
@@ -214,7 +224,8 @@ powershell -ExecutionPolicy Bypass -File demo/render_docx.ps1
     ├── submission_guidelines_check/ # 投稿規定の抽出・照合
     ├── humanizer_academic/          # AI 文体の除去 (スライド §7)
     ├── render_and_upload/           # Markdown → docx → Google Docs (スライド §9)
-    └── fetch_gdoc_changes/          # Google Docs の suggestion / コメント取り込み (スライド §10)
+    ├── fetch_gdoc_changes/          # Google Docs の suggestion / コメント取り込み (スライド §10)
+    └── tracked_revision/            # コメント対応表 → 修正 → 変更履歴+返答入り v2 (§11)
 ```
 
 各 Skill の詳細は `skills/<name>/SKILL.md` を参照。多くの Skill は `tests/` に回帰用フィクスチャを持つ。症例報告をゼロから書くときは `case_report_workflow`、既発表論文への批評レターは `letter_to_editor` が起点 (CLAUDE.md 参照)。
@@ -234,6 +245,7 @@ powershell -ExecutionPolicy Bypass -File demo/render_docx.ps1
 - **`@` でファイル指定して部分修正**。本文全体を一度に書き換えさせない
 - **Methods は `protocol.md` + `analysis.R` から「翻訳」できる**。AI の活躍場面
 - **実際の原稿は `projects/` 配下に置く**。配下はデフォルトで Git 管理外
+- **レビューを受けたら「変更履歴 + 元コメントへの返答 + 対応表」で返す**。修正版だけ送り返すと、どこをどう直したか共著者に伝わらない
 
 ## 関連
 

@@ -17,13 +17,18 @@ def gather_text(parent):
             out.append("\n")
     return "".join(out)
 
-def main(docx_path: Path):
-    out_dir = docx_path.parent / (docx_path.stem + "_unzipped")
-    out_dir.mkdir(exist_ok=True)
-    with zipfile.ZipFile(docx_path) as z:
-        z.extractall(out_dir)
+def main(docx_path: Path, report_dir: Path | None = None):
+    report_dir = report_dir or docx_path.parent
+    report_dir.mkdir(parents=True, exist_ok=True)
 
-    doc = ET.parse(out_dir / "word" / "document.xml").getroot()
+    # zip から document.xml / comments.xml を直接読む。中間フォルダに展開すると、
+    # 前回実行時の comments.xml が残ったまま次の docx (コメント無し) を読んでしまう
+    # ことがあるため、再利用可能な展開フォルダは作らない (A7)。
+    with zipfile.ZipFile(docx_path) as z:
+        names = set(z.namelist())
+        doc = ET.fromstring(z.read("word/document.xml"))
+        comments_xml = z.read("word/comments.xml") if "word/comments.xml" in names else None
+
     paragraphs = list(doc.iter(f"{W}p"))
     p_index = {id(p): i + 1 for i, p in enumerate(paragraphs)}
 
@@ -42,9 +47,8 @@ def main(docx_path: Path):
                 })
 
     comments = []
-    cpath = out_dir / "word" / "comments.xml"
-    if cpath.exists():
-        for c in ET.parse(cpath).getroot().findall(f"{W}comment"):
+    if comments_xml is not None:
+        for c in ET.fromstring(comments_xml).findall(f"{W}comment"):
             comments.append({
                 "id": c.attrib.get(f"{W}id", ""),
                 "author": c.attrib.get(f"{W}author", ""),
@@ -52,9 +56,12 @@ def main(docx_path: Path):
                 "text": gather_text(c),
             })
 
-    # commentRangeStart/End でアンカーテキストを拾う
+    # commentRangeStart/End でアンカーテキストと、アンカーを含む段落の全文を拾う
     flat = list(doc.iter())
-    anchors = {}
+    anchors, contexts = {}, {}
+    for p in paragraphs:
+        for el in p.iter(f"{W}commentRangeStart"):
+            contexts.setdefault(el.attrib.get(f"{W}id", ""), gather_text(p))
     for i, el in enumerate(flat):
         if el.tag == f"{W}commentRangeStart":
             cid = el.attrib.get(f"{W}id", "")
@@ -67,9 +74,10 @@ def main(docx_path: Path):
                     break
     for c in comments:
         c["anchor_text"] = anchors.get(c["id"], "")
+        c["paragraph_context"] = contexts.get(c["id"], "")
 
     report = {"tracked_changes": changes, "comments": comments}
-    (docx_path.parent / "report.json").write_text(
+    (report_dir / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
@@ -87,8 +95,12 @@ def main(docx_path: Path):
     for c in comments:
         md += [f"### コメント {c['id']} — {c['author']} @ {c['date']}",
                f"**アンカー:** `{c['anchor_text']}`", "", c["text"], ""]
-    (docx_path.parent / "report.md").write_text("\n".join(md), encoding="utf-8")
+    (report_dir / "report.md").write_text("\n".join(md), encoding="utf-8")
     print(f"changes={len(changes)} comments={len(comments)}")
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    # 使い方: parse_docx_changes.py <docx> [<report_dir>]
+    # report_dir を省略すると docx と同じフォルダに report.md / report.json を書く。
+    # 生成した tracked docx を検証するときは、入力の report.json を上書きしないよう
+    # 別フォルダ (例: output/) を指定する。
+    main(Path(sys.argv[1]), Path(sys.argv[2]) if len(sys.argv) > 2 else None)

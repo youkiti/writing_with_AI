@@ -41,6 +41,23 @@ AI アシスタントは、ユーザーから明示された場合を除き、`p
 - 棲み分け: 文体 (em-dash・語数・禁止語) は触らない → `proofread-manuscript`。AI 文体痕跡 → `humanizer_academic`。科学的妥当性・公正性・spin → `peer_review_simulator` / `letter_review_simulator`。このスキルは**並べ替え・統合・分割と既存文の最小修正のみ**で、内容・引用を新規創作しない。
 - 順序の目安: ドラフト → **`argument_logic_review` (構造)** → `proofread-manuscript` (文体) → 内容/公正性レビュー。
 
+## 共著者コメントに基づいて修正するとき
+
+共著者が Google Doc にコメント・提案 (suggestion) を付けた版を、対応表付きで
+Markdown に反映し、v2 以降の Google Doc として返すときは `tracked_revision` Skill
+(`skills/tracked_revision/SKILL.md`) を起点にする。取得だけなら `fetch_gdoc_changes`
+Skill、単純な新規アップロードだけなら `render_and_upload` Skill を直接呼ぶ。
+
+省いてはいけない点:
+
+- **アップロードのたびに `versions/` へスナップショットを取り、台帳
+  (`versions_ledger.py`) に記録する**。次回の差分の基準がこれしかない
+- **同じ Google Doc を上書きしない**。修正版は必ず新しい Doc としてアップロードする
+  (同名ファイルで上書きすると、共著者が付けたコメントスレッドが消える)
+- **本文を直す前に、コメント 1 件 1 行の対応表 (`response_table.md`) を作る**。
+  対応表が無いまま直すと、どのコメントにどう応えたかが誰にも分からなくなる
+- 英文の改稿は `skills/case_report_workflow/style_discipline.md` に従う
+
 ## PubMed 文献検索 (検索式は projects 配下に保存)
 
 レターやケースレポートの文献検索は、コミット済みの汎用スクリプト `skills/similar_cases_search/scripts/pubmed_search.py` を使う。Web 検索ツールを持たないモデル (例: 検索できない Gemini) に作業を渡しても、このスクリプトを実行すれば PubMed から根拠付き BibTeX を得られる。
