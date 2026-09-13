@@ -20,12 +20,15 @@ def gather_text(parent):
 def main(docx_path: Path, report_dir: Path | None = None):
     report_dir = report_dir or docx_path.parent
     report_dir.mkdir(parents=True, exist_ok=True)
-    out_dir = report_dir / (docx_path.stem + "_unzipped")
-    out_dir.mkdir(exist_ok=True)
-    with zipfile.ZipFile(docx_path) as z:
-        z.extractall(out_dir)
 
-    doc = ET.parse(out_dir / "word" / "document.xml").getroot()
+    # zip から document.xml / comments.xml を直接読む。中間フォルダに展開すると、
+    # 前回実行時の comments.xml が残ったまま次の docx (コメント無し) を読んでしまう
+    # ことがあるため、再利用可能な展開フォルダは作らない (A7)。
+    with zipfile.ZipFile(docx_path) as z:
+        names = set(z.namelist())
+        doc = ET.fromstring(z.read("word/document.xml"))
+        comments_xml = z.read("word/comments.xml") if "word/comments.xml" in names else None
+
     paragraphs = list(doc.iter(f"{W}p"))
     p_index = {id(p): i + 1 for i, p in enumerate(paragraphs)}
 
@@ -44,9 +47,8 @@ def main(docx_path: Path, report_dir: Path | None = None):
                 })
 
     comments = []
-    cpath = out_dir / "word" / "comments.xml"
-    if cpath.exists():
-        for c in ET.parse(cpath).getroot().findall(f"{W}comment"):
+    if comments_xml is not None:
+        for c in ET.fromstring(comments_xml).findall(f"{W}comment"):
             comments.append({
                 "id": c.attrib.get(f"{W}id", ""),
                 "author": c.attrib.get(f"{W}author", ""),
