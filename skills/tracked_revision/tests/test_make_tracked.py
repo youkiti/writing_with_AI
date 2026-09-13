@@ -747,5 +747,172 @@ class TestReconcileNotCarried(unittest.TestCase):
             self.assertIn("載せなかったコメント (位置を特定できない): 0 件", summary)
 
 
+# ---------------------------------------------------------------- review bug 1: escaped pipes
+class TestReviewBug1EscapedPipeInTable(unittest.TestCase):
+    """`A \\| B` のようにエスケープされた `|` を含むセルが、単純な `.split("|")`
+    で余分な列に割れてデータを失わないこと。"""
+
+    def test_escaped_pipe_cell_round_trip_and_value_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            old_table = (
+                "| Col1 | Col2 |\n"
+                "|------|------|\n"
+                r"| A \| B | old value |" "\n"
+            )
+            new_table = (
+                "| Col1 | Col2 |\n"
+                "|------|------|\n"
+                r"| A \| B | new value |" "\n"
+            )
+            old_text = f"Intro paragraph.\n\n{old_table}\nEnd paragraph.\n"
+            new_text = f"Intro paragraph.\n\n{new_table}\nEnd paragraph.\n"
+            proc = make_tracked(tmp_path, old_text, new_text)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = (tmp_path / "tracked.md").read_text(encoding="utf-8")
+            # エスケープされた | を含むセルが壊れず、他方のセルの変更後の値が残っていること
+            self.assertIn(r"A \| B", out)
+            if HAVE_PANDOC:
+                out_path = tmp_path / "tracked.md"
+                docx_path = tmp_path / "t.docx"
+                pandoc_to_docx(out_path, docx_path)
+                accept_plain = pandoc_plain(docx_path, "accept")
+                reject_plain = pandoc_plain(docx_path, "reject")
+                self.assertIn("new value", accept_plain)
+                self.assertIn("A | B", accept_plain)
+                self.assertIn("old value", reject_plain)
+                self.assertIn("A | B", reject_plain)
+                assert_round_trip(
+                    self, out_path, tmp_path / "old.md", tmp_path / "new.md", tmp_path
+                )
+
+
+# ---------------------------------------------------------------- review bug 2: inline code
+class TestReviewBug2InlineCodeAtomic(unittest.TestCase):
+    """インラインコードスパンの内部で差分境界やコメント境界が切れて、
+    span マークアップがコード内容としてそのまま出力されないこと。"""
+
+    @unittest.skipUnless(HAVE_PANDOC, "pandoc not found on PATH")
+    def test_change_inside_inline_code_round_trips_without_literal_markup(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            old_text = "Use `alpha beta gamma` here.\n"
+            new_text = "Use `alpha delta gamma` here.\n"
+            proc = make_tracked(tmp_path, old_text, new_text)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out_path = tmp_path / "tracked.md"
+            docx_path = tmp_path / "t.docx"
+            pandoc_to_docx(out_path, docx_path)
+            accept_plain = pandoc_plain(docx_path, "accept")
+            self.assertNotIn("insertion", accept_plain)
+            self.assertNotIn("deletion", accept_plain)
+            self.assertNotIn("{.", accept_plain)
+            self.assertIn("alpha delta gamma", accept_plain)
+            reject_plain = pandoc_plain(docx_path, "reject")
+            self.assertNotIn("insertion", reject_plain)
+            self.assertNotIn("deletion", reject_plain)
+            self.assertNotIn("{.", reject_plain)
+            self.assertIn("alpha beta gamma", reject_plain)
+
+    def test_comment_anchored_inside_inline_code_produces_no_literal_markup(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            old_text = "Use `alpha beta gamma` here.\n"
+            new_text = old_text
+            report = {"comments": [
+                {"id": "1", "author": "R", "date": DEFAULT_DATE, "text": "about beta",
+                 "anchor_text": "beta"},
+            ]}
+            proc = make_tracked(tmp_path, old_text, new_text, report=report)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = (tmp_path / "tracked.md").read_text(encoding="utf-8")
+            # コード スパン自体は無傷のまま出力されていること (中に comment-start/end が
+            # 割り込んでいない)
+            self.assertIn("`alpha beta gamma`", out)
+            if HAVE_PANDOC:
+                docx_path = tmp_path / "t.docx"
+                pandoc_to_docx(tmp_path / "tracked.md", docx_path)
+                plain = pandoc_plain(docx_path)
+                self.assertNotIn("comment-start", plain)
+                self.assertNotIn("{.", plain)
+                self.assertIn("alpha beta gamma", plain)
+
+
+# ---------------------------------------------------------------- review bug 3: comment in table
+class TestReviewBug3CommentAnchorAlsoInTable(unittest.TestCase):
+    """アンカーが表セルにも段落にも一致する場合、表側を数え損ねて段落側に
+    誤って乗せないこと。"""
+
+    def test_anchor_in_table_and_paragraph_not_carried(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            table = (
+                "| Setting | Value |\n"
+                "|---------|-------|\n"
+                "| Control | 5 |\n"
+            )
+            old_text = f"The system uses Control feedback for tuning.\n\n{table}\nEnd.\n"
+            new_text = old_text
+            report = {"comments": [
+                {"id": "1", "author": "R", "date": DEFAULT_DATE, "text": "which Control?",
+                 "anchor_text": "Control"},
+            ]}
+            proc = make_tracked(tmp_path, old_text, new_text, report=report)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = (tmp_path / "tracked.md").read_text(encoding="utf-8")
+            self.assertNotIn("comment-start", out)
+            summary = (tmp_path / "tracked.md.summary.md").read_text(encoding="utf-8")
+            self.assertIn("ID 1", summary)
+            self.assertIn("表内", summary)
+
+
+# ---------------------------------------------------------------- review bug 4: repeated anchor
+class TestReviewBug4RepeatedAnchorContextMatch(unittest.TestCase):
+    """anchor がその段落内で複数回出現していても、paragraph_context が
+    その段落と厳密に一致するなら、類似した別の段落 (出現1回) に誤って
+    乗せないこと (乗せられないなら、乗せずに諦める)。"""
+
+    def test_context_matches_paragraph_with_repeated_anchor_not_carried_elsewhere(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            para_a = "Alpha Control mentions Control twice here."
+            para_b = "Beta Control mentions something else nearby."
+            old_text = f"{para_a}\n\n{para_b}\n"
+            new_text = old_text
+            report = {"comments": [
+                {"id": "1", "author": "R", "date": DEFAULT_DATE, "text": "which one?",
+                 "anchor_text": "Control", "paragraph_context": para_a},
+            ]}
+            proc = make_tracked(tmp_path, old_text, new_text, report=report)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = (tmp_path / "tracked.md").read_text(encoding="utf-8")
+            self.assertNotIn("comment-start", out)
+            summary = (tmp_path / "tracked.md.summary.md").read_text(encoding="utf-8")
+            self.assertIn("ID 1", summary)
+
+
+# ---------------------------------------------------------------- review bug 5: heading + body
+class TestReviewBug5HeadingImmediatelyFollowedByBody(unittest.TestCase):
+    """ATX 見出し行の直後 (空行なし) に本文行が続く場合、見出しと本文が
+    1つの段落に結合されて丸ごと見出しとしてレンダリングされないこと。"""
+
+    def test_heading_and_body_stay_separate_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            text = "# Introduction\nBody text right after heading.\n"
+            proc = make_tracked(tmp_path, text, text)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out_path = tmp_path / "tracked.md"
+            out = out_path.read_text(encoding="utf-8")
+            self.assertIn("# Introduction\n\nBody text right after heading.", out)
+            if HAVE_PANDOC:
+                native_accept = pandoc_native(out_path, "accept")
+                self.assertIn("Header", native_accept)
+                self.assertIn("Para", native_accept)
+                native_reject = pandoc_native(out_path, "reject")
+                self.assertIn("Header", native_reject)
+                self.assertIn("Para", native_reject)
+
+
 if __name__ == "__main__":
     unittest.main()

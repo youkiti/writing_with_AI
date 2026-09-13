@@ -24,8 +24,30 @@ CJK = r"　-ヿ㐀-䶿一-鿿豈-﫿＀-￯"
 TOKEN_RE = re.compile(rf"\s+|[^\s{CJK}]+|[{CJK}]")
 
 
+
+# インラインコードスパン (`...` / ``...`` など)。開始と同じ長さのバッククォート列
+# で閉じる。差分やコメント境界がスパンの内側に割り込むと、pandoc はコード内の
+# 文字をそのまま地の文として扱うため、span マークアップが literal に見えてしまう
+# (レビュー指摘2)。そのためスパン全体を tokenize() の1トークンとして扱う。
+CODE_SPAN_RE = re.compile(r"(`+)(?:(?!\1).)+?\1", re.DOTALL)
+
+
 def tokenize(text: str) -> list[str]:
-    return TOKEN_RE.findall(text)
+    tokens: list[str] = []
+    pos = 0
+    for mm in CODE_SPAN_RE.finditer(text):
+        if mm.start() > pos:
+            tokens.extend(TOKEN_RE.findall(text[pos:mm.start()]))
+        tokens.append(mm.group(0))
+        pos = mm.end()
+    if pos < len(text):
+        tokens.extend(TOKEN_RE.findall(text[pos:]))
+    return tokens
+
+
+def code_span_ranges(text: str) -> list[tuple[int, int]]:
+    """text 中のインラインコードスパンの (開始, 終了) 文字位置の一覧。"""
+    return [(mm.start(), mm.end()) for mm in CODE_SPAN_RE.finditer(text)]
 
 
 # ---------------------------------------------------------------- blocks
@@ -75,6 +97,15 @@ def split_blocks(text: str) -> list[dict]:
             continue
         if line.strip() == "":
             flush()
+            i += 1
+            continue
+        if HEADING_RE.match(line):
+            # ATX 見出し行は、直後に空行が無くても必ず単独のブロックにする
+            # (レビュー指摘5)。空行なしで本文行が続くと、これをバッファに
+            # 混ぜて後で classify() が1つの段落として結合してしまい、
+            # 「# 見出し 本文...」が丸ごと見出しとしてレンダリングされていた。
+            flush()
+            blocks.append(classify(line))
             i += 1
             continue
         buf.append(line)
@@ -263,8 +294,8 @@ def wrap_block(block: dict, fn) -> str:
             if SEP_ROW_RE.match(line):
                 rows.append(line)
             else:
-                cells = line.strip().strip("|").split("|")
-                rows.append("| " + " | ".join(fn(c.strip()) if c.strip() else "" for c in cells) + " |")
+                cells = split_table_row(line)
+                rows.append(join_table_row([fn(c) if c else "" for c in cells]))
         return "\n".join(rows)
     out = []
     for line in text.split("\n"):
@@ -385,8 +416,8 @@ def diff_table(old: str, new: str, m: Marks) -> str | None:
                 if SEP_ROW_RE.match(lo) or SEP_ROW_RE.match(ln):
                     out.append(ln)
                     continue
-                co = [c.strip() for c in lo.strip().strip("|").split("|")]
-                cn = [c.strip() for c in ln.strip().strip("|").split("|")]
+                co = split_table_row(lo)
+                cn = split_table_row(ln)
                 if len(co) != len(cn):
                     return None
                 cells = []
@@ -398,7 +429,7 @@ def diff_table(old: str, new: str, m: Marks) -> str | None:
                         if r is None:
                             return None
                         cells.append(r)
-                out.append("| " + " | ".join(cells) + " |")
+                out.append(join_table_row(cells))
         else:
             for lo in ol[i1:i2]:
                 out.append(lo if SEP_ROW_RE.match(lo) else wrap_row(lo, m.dele))
@@ -408,8 +439,8 @@ def diff_table(old: str, new: str, m: Marks) -> str | None:
 
 
 def wrap_row(line: str, fn) -> str:
-    cells = [c.strip() for c in line.strip().strip("|").split("|")]
-    return "| " + " | ".join(fn(c) if c else "" for c in cells) + " |"
+    cells = split_table_row(line)
+    return join_table_row([fn(c) if c else "" for c in cells])
 
 
 # ---------------------------------------------------------------- comments
@@ -445,6 +476,14 @@ def split_table_row(line: str) -> list[str]:
         i += 1
     cells.append("".join(buf).strip())
     return cells
+
+
+def join_table_row(cells: list[str]) -> str:
+    """split_table_row() でエスケープを外して得たセル群を、表の1行に戻す。
+    セル内に残ったリテラル `|` は `\\|` として再エスケープする (レビュー指摘1:
+    単純な split("|")/join だと `A \\| B` のようなセルが余分な列に割れてデータを
+    失う)。"""
+    return "| " + " | ".join(c.replace("|", "\\|") if c else "" for c in cells) + " |"
 
 
 def load_responses(path: Path | None) -> dict[str, dict]:
@@ -487,31 +526,55 @@ def plain_text(md: str) -> str:
 
 
 ANCHOR_SKIP_KINDS = ("code", "raw", "yaml", "table")
+# コメントの位置決定 (何箇所に一致するかの母数) では、表ブロックも数え損ねては
+# いけない (レビュー指摘3)。表への配置自体は main() 側で別途拒否するので、
+# ここでは code/raw/yaml だけを除外する。
+ANCHOR_COUNT_SKIP_KINDS = ("code", "raw", "yaml")
 
 
 def find_anchor_occurrences(anchor: str, blocks: list[dict]) -> tuple[list[tuple[int, int, int]], bool]:
     """anchor 文字列に一致する (block_idx, char_from, char_to) を全ブロック・
-    全出現箇所について返す。表・コード・生HTML・YAML ブロックは対象外 (A2)。
+    全出現箇所について返す。コード・生HTML・YAML ブロックは対象外、表ブロックは
+    件数に含める (表内への配置自体は呼び出し側で拒否する。レビュー指摘3)。
+    アンカーがインラインコードスパンの内部と部分的に重なる場合は、位置を
+    正確に特定できないのでその出現を除外する。ちょうどスパン全体に一致する
+    場合は、スパンの範囲まで広げて (コード内部にマークを置かないよう) 返す
+    (レビュー指摘2)。
     戻り値の bool は、素の文字列検索では見つからず plain_text() で記号を
     落として初めて見つかった (= ブロック全体を近似アンカーにした / fuzzy)
     かどうか。"""
     exact: list[tuple[int, int, int]] = []
     for bi, b in enumerate(blocks):
-        if b["kind"] in ANCHOR_SKIP_KINDS:
+        if b["kind"] in ANCHOR_COUNT_SKIP_KINDS:
             continue
         text = b["text"]
+        spans = code_span_ranges(text)
         start = 0
         while True:
             pos = text.find(anchor, start)
             if pos < 0:
                 break
-            exact.append((bi, pos, pos + len(anchor)))
+            end = pos + len(anchor)
+            widened: tuple[int, int] | None = None
+            drop = False
+            for s0, s1 in spans:
+                if end <= s0 or pos >= s1:
+                    continue  # このコードスパンとは重ならない
+                if pos == s0 and end == s1:
+                    break  # ちょうどスパン全体に一致: そのままでよい
+                if pos >= s0 and end <= s1:
+                    widened = (s0, s1)
+                else:
+                    drop = True
+                break
+            if not drop:
+                exact.append((bi, widened[0], widened[1]) if widened else (bi, pos, end))
             start = pos + 1
     if exact:
         return exact, False
     fuzzy: list[tuple[int, int, int]] = []
     for bi, b in enumerate(blocks):
-        if b["kind"] in ANCHOR_SKIP_KINDS:
+        if b["kind"] in ANCHOR_COUNT_SKIP_KINDS:
             continue
         if plain_text(b["text"]).find(anchor) >= 0:
             fuzzy.append((bi, 0, len(b["text"])))
@@ -533,29 +596,37 @@ def disambiguate_by_context(
     occurrences: list[tuple[int, int, int]], context: str, blocks: list[dict]
 ) -> tuple[int, int, int] | None:
     """同じ anchor が複数箇所にある場合、paragraph_context と一意に最も
-    類似するブロックがあればその occurrence を返す (A2)。あるブロック内に
-    anchor が複数回出現している場合は、その中のどこかまでは絞れないので
-    対象にしない。一意に決まらなければ None (呼び出し側でコメントを諦める)。"""
+    類似するブロックがあればその occurrence を返す (A2)。
+
+    レビュー指摘4: 以前は「そのブロック内で anchor が1回しか出現しない」候補
+    (singles) に絞ってから context と比較していたため、anchor が2回出現する
+    ブロックが paragraph_context と完全一致していても除外され、たまたま
+    1回しか出現しない別の似た段落に誤って配置されていた。まず全ての候補
+    ブロックを context との類似度で比較し、最有力ブロックを選んでから、
+    その最有力ブロック内で anchor が複数回出現していないか (= その中の
+    どこかまでは絞れないか) を確認する。一意に決まらなければ None
+    (呼び出し側でコメントを諦める)。"""
     if not context:
         return None
     by_block: dict[int, list[tuple[int, int, int]]] = {}
     for o in occurrences:
         by_block.setdefault(o[0], []).append(o)
-    singles = [bi for bi, occ in by_block.items() if len(occ) == 1]
-    if not singles:
-        return None
     ratios = sorted(
         (
             (bi, difflib.SequenceMatcher(None, context, blocks[bi]["text"], autojunk=False).ratio())
-            for bi in singles
+            for bi in by_block
         ),
         key=lambda x: -x[1],
     )
+    if not ratios:
+        return None
     best_bi, best_r = ratios[0]
     if best_r < 0.5:
         return None
     if len(ratios) > 1 and ratios[1][1] == best_r:
         return None  # 一意に決まらない
+    if len(by_block[best_bi]) != 1:
+        return None  # 最有力ブロック内に複数出現 → その中のどこかまでは特定できない
     return by_block[best_bi][0]
 
 
@@ -771,7 +842,13 @@ def main() -> int:
         reason: str | None = None
         if anchor:
             occurrences, is_fuzzy = find_anchor_occurrences(anchor, old_blocks)
-            if len(occurrences) == 1:
+            # レビュー指摘3: 表セルにも一致する出現が1つでもあれば、他に段落側の
+            # 一致があっても位置を特定できないものとして載せない。
+            # (以前は表を数える前に件数判定していたため、表 + 段落の2箇所一致が
+            # 段落側の1件として誤ってカウントされ、そちらに配置されていた。)
+            if any(old_blocks[o[0]]["kind"] == "table" for o in occurrences):
+                reason = "アンカーが表内にあり、位置を特定できません"
+            elif len(occurrences) == 1:
                 loc, how = occurrences[0], ("fuzzy" if is_fuzzy else "exact")
             elif len(occurrences) > 1:
                 resolved = disambiguate_by_context(occurrences, c.get("paragraph_context", ""), old_blocks)
