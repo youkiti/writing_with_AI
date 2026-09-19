@@ -914,5 +914,173 @@ class TestReviewBug5HeadingImmediatelyFollowedByBody(unittest.TestCase):
                 self.assertIn("Para", native_reject)
 
 
+# ---------------------------------------------------------------- row-match (label pairing)
+class TestRowMatchLabelPairing(unittest.TestCase):
+    """diff_table() の行対応付け。以前は行数が同じ replace ハンクを位置で
+    対応付けていたため、1行削除して他の行の値も変わっただけで、削除行が
+    別の行に「書き換わった」ように見えていた (medical-safety PR #60 の
+    shared/docx_redline.py の移植元と同じ不具合)。label モード (既定) は
+    先頭のラベル列で行を対応付け、text モードは旧来の挙動を再現する。"""
+
+    OLD_TABLE = (
+        "| Group | Setting | OR |\n"
+        "|---|---|---|\n"
+        "| Age | UE | 1.2 |\n"
+        "| Age | night | 1.5 |\n"
+        "| Sex | male | 0.9 |"
+    )
+    NEW_TABLE = (
+        "| Group | Setting | OR |\n"
+        "|---|---|---|\n"
+        "| Age | night | 1.6 |\n"
+        "| Sex | male | 0.8 |\n"
+        "| Sex | female | 1.1 |"
+    )
+
+    def test_deleted_row_label_pairing_default(self):
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        out = MTM.diff_table(self.OLD_TABLE, self.NEW_TABLE, m)
+        self.assertIsNotNone(out)
+        # Age|UE|1.2 は丸ごと削除される (別の行への書き換えに見えない)
+        self.assertIn(
+            '| [Age]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[UE]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[1.2]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # Age|night は残り、OR 列だけがセル差分される
+        self.assertIn(
+            '| Age | night | [1.5]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"}'
+            '[1.6]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # Sex|male は残り、OR 列だけがセル差分される
+        self.assertIn(
+            '| Sex | male | [0.9]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"}'
+            '[0.8]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # Sex|female|1.1 は丸ごと挿入される
+        self.assertIn(
+            '| [Sex]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[female]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[1.1]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # 削除セル3 + 部分差分2 = 5、挿入セル3 + 部分差分2 = 5 で数が揃う
+        self.assertEqual(out.count(".deletion"), 5)
+        self.assertEqual(out.count(".insertion"), 5)
+
+    @unittest.skipUnless(HAVE_PANDOC, "pandoc not found on PATH")
+    def test_deleted_row_label_pairing_accept_reject_round_trip(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            proc = make_tracked(tmp_path, self.OLD_TABLE + "\n", self.NEW_TABLE + "\n")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out_path = tmp_path / "tracked.md"
+            assert_round_trip(
+                self, out_path, tmp_path / "old.md", tmp_path / "new.md", tmp_path
+            )
+
+    def test_text_mode_reproduces_old_positional_pairing(self):
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        out = MTM.diff_table(self.OLD_TABLE, self.NEW_TABLE, m, row_match="text")
+        # 旧来の挙動: 行数が同じ (3 行 -> 3 行) replace ハンクなので、位置で
+        # 対応付けられ、Age|UE|1.2 の行そのものが Age|night... へセル差分される
+        self.assertIn(
+            '| Age | [UE]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"}'
+            '[night]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[1.2]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"}'
+            '[1.6]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # デフォルト (label) の出力とは異なること
+        label_out = MTM.diff_table(self.OLD_TABLE, self.NEW_TABLE, m, row_match="label")
+        self.assertNotEqual(out, label_out)
+
+    def test_cli_row_match_text_flag_matches_direct_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            proc = make_tracked(
+                tmp_path,
+                self.OLD_TABLE + "\n",
+                self.NEW_TABLE + "\n",
+                extra_args=["--row-match", "text"],
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = (tmp_path / "tracked.md").read_text(encoding="utf-8")
+            m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+            expected = MTM.diff_table(self.OLD_TABLE, self.NEW_TABLE, m, row_match="text")
+            for line in expected.split("\n"):
+                self.assertIn(line, out)
+
+    def test_header_cell_change_is_cell_diffed(self):
+        old_table = "| Group | Setting | OR |\n|---|---|---|\n| Age | UE | 1.2 |"
+        new_table = "| Group | Setting | OR (95% CI) |\n|---|---|---|\n| Age | UE | 1.2 |"
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        out = MTM.diff_table(old_table, new_table, m)
+        self.assertIsNotNone(out)
+        self.assertIn(
+            '| Group | Setting | OR [(95% CI)]{.insertion author="Taro Yamada" '
+            'date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # データ行は変更なしのまま
+        self.assertIn("| Age | UE | 1.2 |", out.split("\n")[-1])
+
+    def test_header_column_count_change_falls_back_to_whole_table(self):
+        old_table = "| Group | Setting | OR |\n|---|---|---|\n| Age | UE | 1.2 |"
+        new_table = "| Group | Setting | OR | Notes |\n|---|---|---|---|\n| Age | UE | 1.2 | ok |"
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        self.assertIsNone(MTM.diff_table(old_table, new_table, m))
+
+    def test_row_column_count_change_falls_back_to_row_delete_insert(self):
+        old_table = (
+            "| Group | Setting | OR |\n"
+            "|---|---|---|\n"
+            "| Age | UE | 1.2 |\n"
+            "| Sex | male | 0.9 |"
+        )
+        new_table = (
+            "| Group | Setting | OR |\n"
+            "|---|---|---|\n"
+            "| Age | UE | 1.2 | extra |\n"
+            "| Sex | male | 0.8 |"
+        )
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        out = MTM.diff_table(old_table, new_table, m)
+        self.assertIsNotNone(out)
+        # 列数が変わった Age 行は丸ごと削除+挿入 (表全体のフォールバックにはならない)
+        self.assertIn(
+            '| [Age]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[UE]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[1.2]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        self.assertIn(
+            '| [Age]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[UE]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[1.2]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[extra]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        # 影響を受けない Sex 行はセル単位で差分される (表全体が失われていない)
+        self.assertIn(
+            '| Sex | male | [0.9]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"}'
+            '[0.8]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+
+    def test_label_width_one_when_second_column_numeric(self):
+        old_cells = [["Age", "1.2"], ["Age", "1.5"], ["Sex", "0.9"]]
+        new_cells = [["Age", "1.6"], ["Sex", "0.8"]]
+        self.assertEqual(MTM._table_label_width(old_cells, new_cells), 1)
+
+    def test_label_width_two_when_second_column_non_numeric(self):
+        old_cells = [["Age", "UE"], ["Age", "night"], ["Sex", "male"]]
+        new_cells = [["Age", "night"], ["Sex", "male"]]
+        self.assertEqual(MTM._table_label_width(old_cells, new_cells), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

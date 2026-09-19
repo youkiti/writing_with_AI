@@ -224,7 +224,10 @@ pandoc $p/output/v2/draft_v2_tracked.md --reference-doc demo/styles/reference.do
   `insertion` / `deletion` span にする
 - 元コメントを同じアンカー位置に `comment-start` / `comment-end` として再挿入し、
   直後に `[対応] 返答` を自分名義のコメントとして付ける
-- 表は行・セル単位で差分を出す。コードブロック・生 HTML・YAML は差分表示できないので
+- 表は行・セル単位で差分を出す。行の対応付けは既定でラベル列 (先頭の非数値列)
+  を基準にする (`--row-match label` が既定。行削除と値変更を混同しない。
+  旧来の行位置ベースの対応付けに戻すには `--row-match text`)
+- コードブロック・生 HTML・YAML は差分表示できないので
   新版だけを出す (削除された側は summary に記録され、出力からは省かれる)
 
 pandoc が span を Word の変更履歴 (`w:ins` / `w:del`) と `comments.xml` に変換する。
