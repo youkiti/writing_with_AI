@@ -309,7 +309,7 @@ def wrap_block(block: dict, fn) -> str:
     return "\n".join(out)
 
 
-def diff_block_pair(old: dict, new: dict, m: Marks, entries: list[dict]) -> str:
+def diff_block_pair(old: dict, new: dict, m: Marks, entries: list[dict], row_match: str = "label") -> str:
     kind = new["kind"]
     def fallback() -> str:
         """丸ごと置換 (コメント付きなら削除ブロックをコメントで挟む)。
@@ -328,7 +328,7 @@ def diff_block_pair(old: dict, new: dict, m: Marks, entries: list[dict]) -> str:
     if old["kind"] != kind:
         return fallback()  # 種類が変わった → 丸ごと置換
     if kind == "table":
-        return diff_table(old["text"], new["text"], m) or fallback()
+        return diff_table(old["text"], new["text"], m, row_match=row_match) or fallback()
     if kind == "para":
         cstarts, cends = char_to_tokens(entries, old["text"])
         res = inline_diff(old["text"], new["text"], m, cstarts, cends)
@@ -404,7 +404,25 @@ def split_prefix(line: str) -> tuple[str, str]:
     return "", line
 
 
-def diff_table(old: str, new: str, m: Marks) -> str | None:
+def diff_table(old: str, new: str, m: Marks, row_match: str = "label") -> str | None:
+    """Markdown 表の2版を突き合わせて tracked-change 化する。
+
+    row_match="text" (旧来の挙動): 行全体のテキストで difflib.SequenceMatcher に
+    掛け、"replace" で行数が一致する場合は行を位置で対応付けてセル差分する。
+    1行削除されて他の行の値も変わっただけで、削除行が「別の行に書き換わった」
+    ように見える不具合がある (行数が同じ replace ハンクを位置で対応付けるため)。
+
+    row_match="label" (既定): 行頭の「ラベル列」(数値でない先頭1〜2列) だけで
+    行を対応付ける (medical-safety PR #60 の shared/docx_redline.py を移植)。
+    ラベルが一致しない replace ハンクは位置で対応付けず、丸ごと削除+挿入にする。
+    """
+    if row_match == "text":
+        return _diff_table_text(old, new, m)
+    return _diff_table_label(old, new, m)
+
+
+def _diff_table_text(old: str, new: str, m: Marks) -> str | None:
+    """row_match="text": 旧来の、行全体テキストで対応付ける実装 (byte-identical に保つ)。"""
     ol, nl = old.split("\n"), new.split("\n")
     sm = difflib.SequenceMatcher(None, ol, nl, autojunk=False)
     out = []
@@ -436,6 +454,122 @@ def diff_table(old: str, new: str, m: Marks) -> str | None:
             for ln in nl[j1:j2]:
                 out.append(ln if SEP_ROW_RE.match(ln) else wrap_row(ln, m.ins))
     return "\n".join(out)
+
+
+def _row_numeric_start(s: str) -> bool:
+    return bool(s) and (s[0].isdigit() or s[0] in "<>≥≤-–—.")
+
+
+def _table_label_width(old_cells: list[list[str]], new_cells: list[list[str]]) -> int:
+    """左から連続する「ラベル列」の数 (最大2)。ヘッダ・セパレータ行は
+    old_cells/new_cells に含めないこと (呼び出し側で除いてから渡す)。"""
+    body = old_cells + new_cells
+    width = 0
+    for j in range(2):
+        vals = [c[j] for c in body if len(c) > j and c[j]]
+        if not vals or sum(_row_numeric_start(v) for v in vals) * 2 >= len(vals):
+            break
+        width = j + 1
+    return max(width, 1)
+
+
+def _row_key(cells: list[str], width: int) -> str:
+    return "\x1f".join(cells[:width])
+
+
+def _table_row_cells_pair(lo: str, ln: str, m: Marks) -> str | None:
+    """1行のペアをセル単位で差分する。列数が一致し、全セルが inline_diff
+    可能なら結合した行を返す。そうでなければ None (呼び出し側でフォールバック)。"""
+    co, cn = split_table_row(lo), split_table_row(ln)
+    if len(co) != len(cn):
+        return None
+    cells = []
+    for x, y in zip(co, cn):
+        if x == y:
+            cells.append(y)
+        else:
+            r = inline_diff(x, y, m, {}, {})
+            if r is None:
+                return None
+            cells.append(r)
+    return join_table_row(cells)
+
+
+def _diff_table_label(old: str, new: str, m: Marks) -> str | None:
+    """row_match="label": ラベル列 (先頭の非数値列、最大2列) で行を対応付ける。"""
+    ol, nl = old.split("\n"), new.split("\n")
+    if not ol or not nl:
+        return None
+
+    # ヘッダ行 (先頭行) は常に対応させ、セル単位で差分する。列数自体が変わった
+    # 場合は表の形が変わったとみなし、呼び出し側での丸ごと置換にフォールバック
+    # する (ヘッダ以外の行の列数変化は、行ごとの削除+挿入で吸収する)。
+    if ol[0] == nl[0]:
+        out = [ol[0]]
+    else:
+        header_row = _table_row_cells_pair(ol[0], nl[0], m)
+        if header_row is None:
+            return None
+        out = [header_row]
+
+    oi, ni = 1, 1
+    o_sep = oi < len(ol) and bool(SEP_ROW_RE.match(ol[oi]))
+    n_sep = ni < len(nl) and bool(SEP_ROW_RE.match(nl[ni]))
+    if o_sep and n_sep:
+        # セパレータ行は常に対応させ、新版のセパレータをそのまま出す
+        out.append(nl[ni])
+        oi += 1
+        ni += 1
+    elif o_sep or n_sep:
+        return None  # セパレータの有無が食い違う = 表の形自体が変わった
+
+    o_body, n_body = ol[oi:], nl[ni:]
+    o_cells = [split_table_row(r) for r in o_body]
+    n_cells = [split_table_row(r) for r in n_body]
+    width = _table_label_width(o_cells, n_cells)
+
+    # 1段目: 行全体のテキストで対応付ける。完全一致する行はアンカーとして
+    # そのまま残す (重複ラベルの行がある場合に、ラベルだけでの対応付けが
+    # 無関係な行同士を結び付けてしまうのを防ぐ)。
+    sm = difflib.SequenceMatcher(None, o_body, n_body, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            out.extend(o_body[i1:i2])
+        else:
+            # 2段目: 行全体では一致しなかった区間だけ、ラベル列で対応付ける。
+            out.extend(_diff_table_body_gap(o_body[i1:i2], n_body[j1:j2], width, m))
+    return "\n".join(out)
+
+
+def _diff_table_body_gap(o_sub: list[str], n_sub: list[str], width: int, m: Marks) -> list[str]:
+    """行全体テキストでは一致しなかった区間を、ラベル列で対応付けて差分する。"""
+    o_keys = [_row_key(split_table_row(r), width) for r in o_sub]
+    n_keys = [_row_key(split_table_row(r), width) for r in n_sub]
+
+    out: list[str] = []
+    sm = difflib.SequenceMatcher(None, o_keys, n_keys, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            # ラベルが一致する行同士: 完全一致ならそのまま、違えばセル単位で差分。
+            for lo, ln in zip(o_sub[i1:i2], n_sub[j1:j2]):
+                if lo == ln:
+                    out.append(lo)
+                    continue
+                row_out = _table_row_cells_pair(lo, ln, m)
+                if row_out is not None:
+                    out.append(row_out)
+                else:
+                    # 列数が変わった等でセル差分できない: その行だけ削除+挿入
+                    out.append(wrap_row(lo, m.dele))
+                    out.append(wrap_row(ln, m.ins))
+        else:
+            # insert/delete/replace: ラベルが対応しない = 位置で対応付けず、
+            # 丸ごと削除+挿入にする (行数がたまたま同じでも位置ペアリングしない)。
+            for lo in o_sub[i1:i2]:
+                out.append(wrap_row(lo, m.dele))
+            for ln in n_sub[j1:j2]:
+                out.append(wrap_row(ln, m.ins))
+    return out
 
 
 def wrap_row(line: str, fn) -> str:
@@ -741,6 +875,14 @@ def main() -> int:
     ap.add_argument("--skip-kind", default="typo", help="この区分のコメントは文書に載せない (カンマ区切り)")
     ap.add_argument("--date", help="変更履歴の日時 (ISO 8601 UTC)。省略時は現在時刻。テストの再現用")
     ap.add_argument(
+        "--row-match",
+        choices=["label", "text"],
+        default="label",
+        help="表の行の対応付け方法。label (既定): 先頭のラベル列で対応付ける "
+             "(行の削除・挿入・値変更を区別できる)。text: 旧来の、行全体テキストで"
+             "対応付ける挙動 (行数が同じ replace ハンクを位置で対応付ける)。",
+    )
+    ap.add_argument(
         "--include-own-comments",
         action="store_true",
         help="--author と同じ著者の report.json コメント (前ラウンドの自分の返信) も、"
@@ -956,7 +1098,9 @@ def main() -> int:
                             emit_old_block(bk, wrapped=True)
                             emitted_old.add(bk)
                             stats["del_blocks"] += 1
-                    out_blocks.append(diff_block_pair(old_blocks[bi], new_blocks[bj], m, marks_for(bi)))
+                    out_blocks.append(
+                        diff_block_pair(old_blocks[bi], new_blocks[bj], m, marks_for(bi), row_match=args.row_match)
+                    )
                     emitted_old.add(bi)
                     stats["mod_blocks"] += 1
                 else:
