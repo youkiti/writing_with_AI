@@ -1081,6 +1081,50 @@ class TestRowMatchLabelPairing(unittest.TestCase):
         new_cells = [["Age", "night"], ["Sex", "male"]]
         self.assertEqual(MTM._table_label_width(old_cells, new_cells), 2)
 
+    def test_duplicate_label_unchanged_rows_stay_anchored(self):
+        # ラベル列だけで対応付けると、Age|Age|Sex -> Age|Sex の最長一致は
+        # old[1:3]<->new[0:2] になり、Age|1.2 が削除・1.5->1.2 のセル差分に
+        # 見えてしまう (キー単位のみのマッチングの回帰)。行全体テキストで
+        # まず一致行をアンカーにすれば、不変の Age|1.2 と Sex|0.9 は残り、
+        # 変化した行 (Age|1.5) だけが丸ごと削除される。
+        old_table = "| Group | OR |\n|---|---|\n| Age | 1.2 |\n| Age | 1.5 |\n| Sex | 0.9 |"
+        new_table = "| Group | OR |\n|---|---|\n| Age | 1.2 |\n| Sex | 0.9 |"
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        out = MTM.diff_table(old_table, new_table, m)
+        self.assertIsNotNone(out)
+        self.assertIn("| Age | 1.2 |", out)
+        self.assertIn("| Sex | 0.9 |", out)
+        self.assertIn(
+            '| [Age]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} | '
+            '[1.5]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        self.assertEqual(out.count(".insertion"), 0)
+        self.assertEqual(out.count(".deletion"), 2)
+
+    def test_duplicate_label_with_changed_value_still_cell_diffed(self):
+        # 重複ラベル (Age, Age, Sex) に加えて実際の値変更 (1.5 -> 1.6) が
+        # 混在する場合でも、不変の2行はアンカーとして残り、変化した行だけが
+        # セル差分される。
+        old_table = (
+            "| Group | OR |\n|---|---|\n| Age | 1.2 |\n| Age | 1.5 |\n| Sex | 0.9 |"
+        )
+        new_table = (
+            "| Group | OR |\n|---|---|\n| Age | 1.2 |\n| Age | 1.6 |\n| Sex | 0.9 |"
+        )
+        m = MTM.Marks(DEFAULT_AUTHOR, DEFAULT_DATE)
+        out = MTM.diff_table(old_table, new_table, m)
+        self.assertIsNotNone(out)
+        self.assertIn("| Age | 1.2 |", out)
+        self.assertIn("| Sex | 0.9 |", out)
+        self.assertIn(
+            '| Age | [1.5]{.deletion author="Taro Yamada" date="2026-09-12T00:00:00Z"}'
+            '[1.6]{.insertion author="Taro Yamada" date="2026-09-12T00:00:00Z"} |',
+            out,
+        )
+        self.assertEqual(out.count(".deletion"), 1)
+        self.assertEqual(out.count(".insertion"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

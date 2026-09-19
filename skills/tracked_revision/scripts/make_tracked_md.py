@@ -527,14 +527,31 @@ def _diff_table_label(old: str, new: str, m: Marks) -> str | None:
     o_cells = [split_table_row(r) for r in o_body]
     n_cells = [split_table_row(r) for r in n_body]
     width = _table_label_width(o_cells, n_cells)
-    o_keys = [_row_key(c, width) for c in o_cells]
-    n_keys = [_row_key(c, width) for c in n_cells]
 
+    # 1段目: 行全体のテキストで対応付ける。完全一致する行はアンカーとして
+    # そのまま残す (重複ラベルの行がある場合に、ラベルだけでの対応付けが
+    # 無関係な行同士を結び付けてしまうのを防ぐ)。
+    sm = difflib.SequenceMatcher(None, o_body, n_body, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            out.extend(o_body[i1:i2])
+        else:
+            # 2段目: 行全体では一致しなかった区間だけ、ラベル列で対応付ける。
+            out.extend(_diff_table_body_gap(o_body[i1:i2], n_body[j1:j2], width, m))
+    return "\n".join(out)
+
+
+def _diff_table_body_gap(o_sub: list[str], n_sub: list[str], width: int, m: Marks) -> list[str]:
+    """行全体テキストでは一致しなかった区間を、ラベル列で対応付けて差分する。"""
+    o_keys = [_row_key(split_table_row(r), width) for r in o_sub]
+    n_keys = [_row_key(split_table_row(r), width) for r in n_sub]
+
+    out: list[str] = []
     sm = difflib.SequenceMatcher(None, o_keys, n_keys, autojunk=False)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             # ラベルが一致する行同士: 完全一致ならそのまま、違えばセル単位で差分。
-            for lo, ln in zip(o_body[i1:i2], n_body[j1:j2]):
+            for lo, ln in zip(o_sub[i1:i2], n_sub[j1:j2]):
                 if lo == ln:
                     out.append(lo)
                     continue
@@ -548,11 +565,11 @@ def _diff_table_label(old: str, new: str, m: Marks) -> str | None:
         else:
             # insert/delete/replace: ラベルが対応しない = 位置で対応付けず、
             # 丸ごと削除+挿入にする (行数がたまたま同じでも位置ペアリングしない)。
-            for lo in o_body[i1:i2]:
+            for lo in o_sub[i1:i2]:
                 out.append(wrap_row(lo, m.dele))
-            for ln in n_body[j1:j2]:
+            for ln in n_sub[j1:j2]:
                 out.append(wrap_row(ln, m.ins))
-    return "\n".join(out)
+    return out
 
 
 def wrap_row(line: str, fn) -> str:
