@@ -1,6 +1,6 @@
 ---
 name: citation_verify
-version: 0.1.0
+version: 0.2.0
 description: |
   Verify every BibTeX entry in `refs.bib` against Crossref / PubMed using
   citeguard (citation-checker) and surface a structured report. Never modifies
@@ -8,7 +8,10 @@ description: |
   summary. Designed to be called by `similar_cases_search` immediately after
   appending new candidates, and again by `case_report_workflow` after the
   author finishes manuscript revisions. Categories surfaced: `found`,
-  `likely_wrong`, `not_found`, `retraction`.
+  `likely_wrong`, `not_found`, `retraction`. Scope limit: this is
+  bibliographic verification only — it does NOT check whether each cited
+  source actually supports the claim made in the manuscript. Pair it with a
+  claim-support pass before submission (see "Scope limit" section).
 allowed-tools:
   - Read
   - Grep
@@ -158,9 +161,37 @@ After the summary, append a short "Recommended action" block:
   typed, consider re-fetching via `similar_cases_search`."
 - For `retraction`: "Decide whether to drop the citation or cite-as-retracted
   per the target journal's policy."
+- Always, before submission: "Run the claim-support pass (see 'Scope limit'
+  below) — a clean bibliographic report does not mean each source supports
+  the sentence citing it."
 
 **Never propose edits to `refs.bib` from this skill.** The author or another
 skill makes that change.
+
+## Scope limit: bibliographic existence ≠ claim support
+
+A citation can pass every citeguard check (correct authors, title, journal,
+year, DOI, not retracted) and still fail the reader: the cited source may not
+support the specific claim the manuscript attaches to it. Real near-miss:
+a correctly-cited news feature was used to support a country-level claim,
+but the supporting data appeared only in a figure inside the article, and
+the article's own country ranking pointed the other way. citeguard cannot
+catch this — it never reads the source's content against the manuscript.
+
+Therefore, before submission, run one **claim-support pass** separately:
+
+1. List every in-text citation together with the exact sentence it supports.
+2. For each pair, open the source (abstract at minimum; full text when the
+   claim is specific) and locate the passage, table, or figure that supports
+   the sentence.
+3. Mark each pair `supported` / `partially supported (rephrase)` /
+   `not supported (replace or delete)`. A claim resting on a figure or a
+   subgroup rather than the source's main finding should be rephrased to
+   match what the source actually shows.
+4. Surface the list to the author; the author decides rephrasings.
+
+Do not treat a clean citeguard report as "citations are fine" — it only
+means "citations exist and are not retracted".
 
 ## Rules (must follow)
 

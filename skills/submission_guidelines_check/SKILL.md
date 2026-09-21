@@ -1,6 +1,6 @@
 ---
 name: submission_guidelines_check
-version: 0.2.0
+version: 0.3.0
 description: |
   Two-mode tool for case-report submission compliance. In `extract_only`
   mode, fetches the target journal's Author Instructions and emits a
@@ -160,6 +160,46 @@ Categories (use these IDs so downstream skills can recognize them):
 If a category is absent from the journal's guidelines (e.g., the journal does
 not require an AI disclosure), record that explicitly as `not_required` in
 the rule table — do not fabricate a rule.
+
+### 2a. Total-budget venues: build an itemized character/word budget
+
+Some venues (common for Japanese commissioned articles and reviews) set one
+**total** limit that includes the reference list and a per-figure/table
+character equivalent (e.g., "4,800 characters total including figures/tables
+and references; one figure or table counts as 400 characters"). When the
+extracted SG1 rules are of this shape, additionally emit an **itemized
+budget table** and keep it up to date on every re-run:
+
+| item | value | how obtained |
+|---|---|---|
+| total limit | from SG1 | quoted rule |
+| figure/table equivalents | count × conversion | quoted rule |
+| reference list | **measured, in the venue's own citation format** | render + count |
+| captions / legends | measured | count |
+| acknowledgements / declarations | measured | count |
+| **remaining for body** | total − all of the above | arithmetic |
+
+Hard-won rules for this table:
+
+- **Measure the reference list in the venue's own format from the first
+  draft** — do not estimate it. Estimates drift badly as references are
+  added and reformatted (a real case drifted 450 → 825 characters across
+  drafts, silently eating the body budget). If the working draft uses a
+  different citation style (e.g., AMA via CSL), render a throwaway copy in
+  the venue's format just to count it.
+- **Keep inclusion ambiguities visible as `unclear`** (does the total count
+  the title, author list, affiliations, keywords, captions?). Alongside the
+  best-guess budget, also show the strict-side total assuming everything
+  counts, so the author sees the worst case.
+- **Every added figure/table states its cost**: "+1 figure = +N characters
+  of equivalent; to stay in budget, cut X". Emit this arithmetic with the
+  finding, not after the author has already accepted the addition.
+- **When content must be dropped to fit the budget** (a scene, a figure, a
+  paragraph), report the over-budget amount and the candidate cuts — but the
+  choice of *what* to drop is the author's. Present it as an explicit
+  either/or decision; do not pick silently. (Real case: the AI chose which
+  of two figures to drop; the author reversed it minutes later. The rework
+  was avoidable by presenting the exclusive choice first.)
 
 ### 2b. (extract_only only) Emit the rule table and stop
 
