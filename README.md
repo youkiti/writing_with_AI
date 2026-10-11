@@ -1,5 +1,10 @@
 # Writing with AI — 参加者用リポジトリ
 
+> **このリポジトリは [SRWS-PSG/writing_with_ai](https://github.com/SRWS-PSG/writing_with_ai) に移りました (2026-10-11)。**
+> Skill・demo・履歴はすべて移転先にあり、以後の更新は移転先だけで行います。ここはアーカイブ (読み取り専用) です。
+> 新しく使う人は `git clone https://github.com/SRWS-PSG/writing_with_ai.git` を使ってください。
+> サブモジュールとして入れている人は、向き先を `git submodule set-url <パス> https://github.com/SRWS-PSG/writing_with_ai.git` で付け替えてください。
+
 SRWS-PSG ハンズオンカフェ「Writing with AI」(2026-05-13 17:30-18:30) で使う最小ファイル一式。
 
 ## このリポジトリの位置づけ
